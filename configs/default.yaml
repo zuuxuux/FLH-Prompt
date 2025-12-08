@@ -1,0 +1,26 @@
+# FLH-Prompts Default Configuration
+
+# Dataset
+dataset: sst2
+backbone: bert-base-uncased
+
+# Prompt settings
+prompt_length: 20
+embed_dim: 768
+
+# FLH parameters
+alpha: 0.1
+birth_interval: 500
+flip_interval: 1000
+
+# Training
+total_steps: 10000
+batch_size: 32
+lr: 0.001
+train_mode: weighted_only  # weighted_only or all_prompts
+
+# Wandb
+wandb_project: flh-prompts
+
+# Device
+device: cuda
