@@ -10,7 +10,7 @@ import wandb
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from tqdm import tqdm
 
-from flh_prompts.data.streaming import StreamingSST2
+from flh_prompts.data.streaming import StreamingSST2, StreamingAmazonMultiDomain, AMAZON_DOMAINS
 from flh_prompts.models.frozen_backbone import FrozenBERTWithPrompt
 from flh_prompts.models.flh_pool import FLHPromptPool
 
@@ -19,7 +19,7 @@ from flh_prompts.models.flh_pool import FLHPromptPool
 class TrainConfig:
     """Training configuration."""
     # Dataset
-    dataset: str = "sst2"
+    dataset: Literal["sst2", "amazon"] = "sst2"
     backbone: str = "bert-base-uncased"
 
     # Prompt settings
@@ -30,9 +30,14 @@ class TrainConfig:
     alpha: float = 0.1
     birth_interval: int = 500
 
-    # Data
+    # Data - SST2 label-flip settings
     flip_interval: int = 1000
     batch_size: int = 32
+
+    # Data - Amazon domain rotation settings
+    steps_per_domain: int = 1000
+    amazon_domains: Optional[list[str]] = None  # None = use all 5 domains
+    balance_labels: bool = True
 
     # Training
     total_steps: int = 10000
@@ -128,11 +133,20 @@ def train_flh(config: TrainConfig) -> dict:
     )
 
     print("Setting up data stream...")
-    data_stream = StreamingSST2(
-        flip_every_n=config.flip_interval,
-        batch_size=config.batch_size,
-        tokenizer_name=config.backbone,
-    )
+    if config.dataset == "amazon":
+        data_stream = StreamingAmazonMultiDomain(
+            steps_per_domain=config.steps_per_domain,
+            batch_size=config.batch_size,
+            tokenizer_name=config.backbone,
+            domains=config.amazon_domains,
+            balance_labels=config.balance_labels,
+        )
+    else:  # sst2
+        data_stream = StreamingSST2(
+            flip_every_n=config.flip_interval,
+            batch_size=config.batch_size,
+            tokenizer_name=config.backbone,
+        )
 
     # Initialize prompt pool with first prompt
     print("Initializing FLH prompt pool...")
@@ -159,6 +173,8 @@ def train_flh(config: TrainConfig) -> dict:
         "regimes": [],
         "weight_entropies": [],
         "num_prompts": [],
+        "domains": [],  # For Amazon dataset
+        "domain_idxs": [],  # For Amazon dataset
     }
 
     # Training loop
@@ -177,15 +193,22 @@ def train_flh(config: TrainConfig) -> dict:
             if step >= config.total_steps:
                 break
 
-            # Move batch to device
-            batch = {
+            # Move batch to device - common fields
+            batch_device = {
                 "input_ids": batch["input_ids"].to(config.device),
                 "attention_mask": batch["attention_mask"].to(config.device),
                 "labels": batch["labels"].to(config.device),
                 "step": batch["step"],
                 "regime": batch["regime"],
-                "flipped": batch["flipped"],
             }
+
+            # Add dataset-specific fields
+            if config.dataset == "amazon":
+                batch_device["domain"] = batch["domain"]
+                batch_device["domain_idx"] = batch["domain_idx"]
+                batch_device["domain_display"] = batch["domain_display"]
+            else:
+                batch_device["flipped"] = batch["flipped"]
 
             # Birth new prompt at intervals
             if step > 0 and step % config.birth_interval == 0:
@@ -194,30 +217,43 @@ def train_flh(config: TrainConfig) -> dict:
                 optimizer.add_param_group({"params": [new_prompt]})
 
             # FLH weight update
-            losses_all = pool.get_all_losses(model, batch)
+            losses_all = pool.get_all_losses(model, batch_device)
             pool.update_weights(losses_all)
 
             # Training step
-            loss, accuracy = train_step(model, pool, batch, optimizer, config.train_mode)
+            loss, accuracy = train_step(model, pool, batch_device, optimizer, config.train_mode)
 
             # Store results
             results["steps"].append(step)
             results["losses"].append(loss)
             results["accuracies"].append(accuracy)
-            results["regimes"].append(batch["regime"])
+            results["regimes"].append(batch_device["regime"])
             results["weight_entropies"].append(pool.get_entropy())
             results["num_prompts"].append(pool.num_prompts())
 
+            # Dataset-specific results
+            if config.dataset == "amazon":
+                results["domains"].append(batch_device["domain"])
+                results["domain_idxs"].append(batch_device["domain_idx"])
+
             # Log to wandb
-            wandb.log({
+            log_dict = {
                 "step": step,
                 "loss": loss,
                 "accuracy": accuracy,
-                "regime": batch["regime"],
-                "flipped": batch["flipped"],
+                "regime": batch_device["regime"],
                 "weight_entropy": pool.get_entropy(),
                 "num_prompts": pool.num_prompts(),
-            })
+            }
+
+            # Add dataset-specific logging
+            if config.dataset == "amazon":
+                log_dict["domain"] = batch_device["domain"]
+                log_dict["domain_idx"] = batch_device["domain_idx"]
+            else:
+                log_dict["flipped"] = batch_device["flipped"]
+
+            wandb.log(log_dict)
 
             # Checkpoint
             if step > 0 and step % config.checkpoint_interval == 0:

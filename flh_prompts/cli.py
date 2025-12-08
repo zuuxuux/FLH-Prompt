@@ -36,6 +36,11 @@ def train(
         "--method", "-m",
         help="Training method: flh, single, random, similarity",
     ),
+    dataset: str = typer.Option(
+        "sst2",
+        "--dataset",
+        help="Dataset: sst2 (label-flip) or amazon (domain rotation)",
+    ),
     train_mode: str = typer.Option(
         "weighted_only",
         "--train-mode", "-t",
@@ -69,7 +74,17 @@ def train(
     flip_interval: Optional[int] = typer.Option(
         None,
         "--flip-interval", "-f",
-        help="Steps between label flips",
+        help="Steps between label flips (SST2 only)",
+    ),
+    steps_per_domain: Optional[int] = typer.Option(
+        None,
+        "--steps-per-domain",
+        help="Steps per domain before switching (Amazon only)",
+    ),
+    amazon_domains: Optional[str] = typer.Option(
+        None,
+        "--amazon-domains",
+        help="Comma-separated list of Amazon domains (default: all 5)",
     ),
     lr: Optional[float] = typer.Option(
         None,
@@ -101,9 +116,14 @@ def train(
         cfg_dict["birth_interval"] = birth_interval
     if flip_interval is not None:
         cfg_dict["flip_interval"] = flip_interval
+    if steps_per_domain is not None:
+        cfg_dict["steps_per_domain"] = steps_per_domain
+    if amazon_domains is not None:
+        cfg_dict["amazon_domains"] = [d.strip() for d in amazon_domains.split(",")]
     if lr is not None:
         cfg_dict["lr"] = lr
 
+    cfg_dict["dataset"] = dataset
     cfg_dict["train_mode"] = train_mode
     cfg_dict["wandb_project"] = wandb_project
     cfg_dict["device"] = device

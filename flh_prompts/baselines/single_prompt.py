@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import wandb
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
-from flh_prompts.data.streaming import StreamingSST2
+from flh_prompts.data.streaming import StreamingSST2, StreamingAmazonMultiDomain
 from flh_prompts.models.frozen_backbone import FrozenBERTWithPrompt
 from flh_prompts.training.trainer import TrainConfig
 
@@ -42,11 +42,20 @@ def train_single_prompt(config: TrainConfig) -> dict:
 
     # Setup data
     print("Setting up data stream...")
-    data_stream = StreamingSST2(
-        flip_every_n=config.flip_interval,
-        batch_size=config.batch_size,
-        tokenizer_name=config.backbone,
-    )
+    if config.dataset == "amazon":
+        data_stream = StreamingAmazonMultiDomain(
+            steps_per_domain=config.steps_per_domain,
+            batch_size=config.batch_size,
+            tokenizer_name=config.backbone,
+            domains=config.amazon_domains,
+            balance_labels=config.balance_labels,
+        )
+    else:  # sst2
+        data_stream = StreamingSST2(
+            flip_every_n=config.flip_interval,
+            batch_size=config.batch_size,
+            tokenizer_name=config.backbone,
+        )
 
     # Single prompt
     print("Initializing single prompt...")
@@ -67,6 +76,8 @@ def train_single_prompt(config: TrainConfig) -> dict:
         "losses": [],
         "accuracies": [],
         "regimes": [],
+        "domains": [],  # For Amazon dataset
+        "domain_idxs": [],  # For Amazon dataset
     }
 
     # Training loop
@@ -85,19 +96,25 @@ def train_single_prompt(config: TrainConfig) -> dict:
             if step >= config.total_steps:
                 break
 
-            # Move to device
-            batch = {
+            # Move to device - common fields
+            batch_device = {
                 "input_ids": batch["input_ids"].to(config.device),
                 "attention_mask": batch["attention_mask"].to(config.device),
                 "labels": batch["labels"].to(config.device),
                 "step": batch["step"],
                 "regime": batch["regime"],
-                "flipped": batch["flipped"],
             }
 
+            # Add dataset-specific fields
+            if config.dataset == "amazon":
+                batch_device["domain"] = batch["domain"]
+                batch_device["domain_idx"] = batch["domain_idx"]
+            else:
+                batch_device["flipped"] = batch["flipped"]
+
             # Forward pass
-            logits = model(batch["input_ids"], batch["attention_mask"], prompt)
-            loss = F.cross_entropy(logits, batch["labels"])
+            logits = model(batch_device["input_ids"], batch_device["attention_mask"], prompt)
+            loss = F.cross_entropy(logits, batch_device["labels"])
 
             # Backward pass
             loss.backward()
@@ -107,22 +124,34 @@ def train_single_prompt(config: TrainConfig) -> dict:
             # Compute accuracy
             with torch.no_grad():
                 preds = logits.argmax(dim=-1)
-                accuracy = (preds == batch["labels"]).float().mean().item()
+                accuracy = (preds == batch_device["labels"]).float().mean().item()
 
             # Store results
             results["steps"].append(step)
             results["losses"].append(loss.item())
             results["accuracies"].append(accuracy)
-            results["regimes"].append(batch["regime"])
+            results["regimes"].append(batch_device["regime"])
+
+            # Dataset-specific results
+            if config.dataset == "amazon":
+                results["domains"].append(batch_device["domain"])
+                results["domain_idxs"].append(batch_device["domain_idx"])
 
             # Log to wandb
-            wandb.log({
+            log_dict = {
                 "step": step,
                 "loss": loss.item(),
                 "accuracy": accuracy,
-                "regime": batch["regime"],
-                "flipped": batch["flipped"],
-            })
+                "regime": batch_device["regime"],
+            }
+
+            if config.dataset == "amazon":
+                log_dict["domain"] = batch_device["domain"]
+                log_dict["domain_idx"] = batch_device["domain_idx"]
+            else:
+                log_dict["flipped"] = batch_device["flipped"]
+
+            wandb.log(log_dict)
 
             # Checkpoint
             if step > 0 and step % config.checkpoint_interval == 0:
