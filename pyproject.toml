@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.0",
+    "torchvision>=0.15",
     "transformers>=4.35",
     "peft>=0.7",
     "datasets>=2.15",
@@ -21,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 flh = "flh_prompts.cli:app"
+flh-vision = "flh_prompts.vision_cli:app"
 
 [build-system]
 requires = ["hatchling"]
