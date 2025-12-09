@@ -158,8 +158,11 @@ def train_flh(config: TrainConfig) -> dict:
     )
     pool.birth_prompt()
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(pool.get_parameters(), lr=config.lr)
+    # Setup optimizer - include both prompt params and classifier params
+    optimizer = torch.optim.AdamW(
+        pool.get_parameters() + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)

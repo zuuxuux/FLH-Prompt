@@ -68,8 +68,11 @@ def train_fixed_random(config: TrainConfig, num_prompts: int = 10) -> dict:
         for _ in range(num_prompts)
     ]
 
-    # Optimizer for all prompts
-    optimizer = torch.optim.AdamW(prompts, lr=config.lr)
+    # Optimizer for all prompts and classifier
+    optimizer = torch.optim.AdamW(
+        prompts + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)

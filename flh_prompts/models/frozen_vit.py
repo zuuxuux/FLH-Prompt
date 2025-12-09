@@ -38,9 +38,10 @@ class FrozenViTWithPrompt(nn.Module):
             ignore_mismatched_sizes=True,  # Allow different num_labels
         ).to(device)
 
-        # Freeze all parameters
-        for param in self.model.parameters():
+        # Freeze only the ViT backbone, keep classifier trainable
+        for param in self.model.vit.parameters():
             param.requires_grad = False
+        # Classifier stays trainable (requires_grad=True by default)
 
         # Get embedding dimension (768 for ViT-Base)
         self.embed_dim = self.model.config.hidden_size

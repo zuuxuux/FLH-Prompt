@@ -33,9 +33,10 @@ class FrozenBERTWithPrompt(nn.Module):
             num_labels=num_labels,
         ).to(device)
 
-        # Freeze all parameters
-        for param in self.model.parameters():
+        # Freeze only the BERT backbone, keep classifier trainable
+        for param in self.model.bert.parameters():
             param.requires_grad = False
+        # Classifier stays trainable (requires_grad=True by default)
 
         # Get embedding dimension
         self.embed_dim = self.model.config.hidden_size

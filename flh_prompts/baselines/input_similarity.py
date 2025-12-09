@@ -264,8 +264,11 @@ def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
         )
     pool.initialize_keys_from_data(model, init_stream, num_samples=200)
 
-    # Optimizer for prompts only (keys are fixed)
-    optimizer = torch.optim.AdamW(pool.get_parameters(), lr=config.lr)
+    # Optimizer for prompts and classifier (keys are fixed)
+    optimizer = torch.optim.AdamW(
+        pool.get_parameters() + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)

@@ -181,8 +181,11 @@ def train_flh_vision(config: VisionTrainConfig) -> dict:
     )
     pool.birth_prompt()
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(pool.get_parameters(), lr=config.lr)
+    # Setup optimizer - include both prompt params and classifier params
+    optimizer = torch.optim.AdamW(
+        pool.get_parameters() + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)
@@ -331,8 +334,11 @@ def train_single_prompt_vision(config: VisionTrainConfig) -> dict:
         torch.randn(config.prompt_length, config.embed_dim, device=config.device) * 0.02
     )
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW([prompt], lr=config.lr)
+    # Setup optimizer - include both prompt and classifier params
+    optimizer = torch.optim.AdamW(
+        [prompt] + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)
@@ -476,8 +482,11 @@ def train_random_pool_vision(config: VisionTrainConfig, num_prompts: int = 10) -
         for _ in range(num_prompts)
     ])
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(list(prompts), lr=config.lr)
+    # Setup optimizer - include both prompts and classifier params
+    optimizer = torch.optim.AdamW(
+        list(prompts) + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)
@@ -749,8 +758,11 @@ def train_similarity_vision(config: VisionTrainConfig, num_prompts: int = 10) ->
         )
     pool.initialize_keys_from_data(model, init_stream, num_samples=200)
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(pool.get_parameters(), lr=config.lr)
+    # Optimizer - include both prompt params and classifier params
+    optimizer = torch.optim.AdamW(
+        pool.get_parameters() + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)

@@ -63,8 +63,11 @@ def train_single_prompt(config: TrainConfig) -> dict:
         torch.randn(config.prompt_length, config.embed_dim, device=config.device) * 0.02
     )
 
-    # Optimizer
-    optimizer = torch.optim.AdamW([prompt], lr=config.lr)
+    # Optimizer - include both prompt and classifier params
+    optimizer = torch.optim.AdamW(
+        [prompt] + list(model.model.classifier.parameters()),
+        lr=config.lr
+    )
 
     # Checkpoint directory
     checkpoint_dir = Path(config.checkpoint_dir)
