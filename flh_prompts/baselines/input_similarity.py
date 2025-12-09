@@ -40,64 +40,156 @@ class PromptPoolWithKeys(nn.Module):
             for _ in range(num_prompts)
         ])
 
-        # Initialize keys (one per prompt)
+        # Keys will be initialized from data in initialize_keys_from_data()
+        # Start with placeholder random keys
         self.keys = nn.ParameterList([
-            nn.Parameter(torch.randn(embed_dim, device=device) * 0.02)
+            nn.Parameter(torch.randn(embed_dim, device=device), requires_grad=False)
             for _ in range(num_prompts)
         ])
+        self._keys_initialized = False
+
+    def initialize_keys_from_data(
+        self,
+        model: "FrozenBERTWithPrompt",
+        data_stream,
+        num_samples: int = 100,
+    ) -> None:
+        """Initialize keys from CLS embeddings of actual data samples.
+
+        Uses k-means-style clustering to find diverse key vectors that
+        span the input embedding space.
+        """
+        if self._keys_initialized:
+            return
+
+        # Collect CLS embeddings from data
+        embeddings = []
+        for i, batch in enumerate(data_stream):
+            if len(embeddings) * batch["input_ids"].size(0) >= num_samples:
+                break
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            emb = self.get_input_embedding(model, input_ids, attention_mask)
+            embeddings.append(emb)
+
+        all_embeddings = torch.cat(embeddings, dim=0)[:num_samples]
+
+        # Use k-means++ initialization to get diverse keys
+        keys = []
+        # First key: random sample
+        idx = torch.randint(0, all_embeddings.size(0), (1,)).item()
+        keys.append(all_embeddings[idx])
+
+        # Subsequent keys: sample proportional to squared distance from nearest key
+        for _ in range(1, self.num_prompts):
+            # Compute distance to nearest existing key
+            key_stack = torch.stack(keys)
+            dists = torch.cdist(all_embeddings, key_stack)  # [n, k]
+            min_dists = dists.min(dim=1).values  # [n]
+            # Sample proportional to squared distance
+            probs = min_dists ** 2
+            probs = probs / probs.sum()
+            idx = torch.multinomial(probs, 1).item()
+            keys.append(all_embeddings[idx])
+
+        # Update key parameters
+        for i, key in enumerate(keys):
+            self.keys[i].data = F.normalize(key, dim=0)
+
+        self._keys_initialized = True
 
     def get_input_embedding(
         self,
         model: FrozenBERTWithPrompt,
         input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Get the [CLS] token embedding for input-based selection.
+
+        Uses the backbone's CLS output (without prompt) for a more
+        discriminative representation than raw word embeddings.
 
         Args:
             model: The frozen backbone model.
             input_ids: Token IDs of shape [batch, seq_len].
+            attention_mask: Attention mask of shape [batch, seq_len].
 
         Returns:
             CLS embeddings of shape [batch, embed_dim].
         """
         with torch.no_grad():
-            # Get word embeddings (without position embeddings for simpler matching)
-            embeddings = model.embeddings.word_embeddings(input_ids)
-            # Use mean of all tokens as input representation
-            return embeddings.mean(dim=1)
+            # Run through BERT encoder WITHOUT prompt to get CLS representation
+            # This gives a more discriminative embedding than raw word embeddings
+            input_embeds = model.embeddings.word_embeddings(input_ids)
+            position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0)
+            position_embeds = model.embeddings.position_embeddings(position_ids)
+            token_type_ids = torch.zeros_like(input_ids)
+            token_type_embeds = model.embeddings.token_type_embeddings(token_type_ids)
+
+            embeddings = input_embeds + position_embeds + token_type_embeds
+            embeddings = model.embeddings.LayerNorm(embeddings)
+            embeddings = model.embeddings.dropout(embeddings)
+
+            # Get extended attention mask
+            extended_mask = attention_mask[:, None, None, :]
+            extended_mask = (1.0 - extended_mask.float()) * -10000.0
+
+            # Run through encoder
+            encoder_outputs = model.model.bert.encoder(embeddings, attention_mask=extended_mask)
+
+            # CLS token is the first token's hidden state
+            cls_embedding = encoder_outputs[0][:, 0, :]
+            return cls_embedding
 
     def select_prompt(
         self,
         query: torch.Tensor,
-    ) -> tuple[int, torch.Tensor]:
+    ) -> tuple[int, torch.Tensor, torch.Tensor]:
         """Select prompt based on cosine similarity to keys.
+
+        Uses per-sample similarity computation, then voting across batch
+        to select the most frequently chosen prompt (L2P-style).
 
         Args:
             query: Query vector of shape [batch, embed_dim].
 
         Returns:
-            Tuple of (selected_index, selected_prompt).
+            Tuple of (selected_index, selected_prompt, pull_loss).
+            pull_loss encourages selected key to match query (L2P-style).
         """
         # Stack keys: [num_prompts, embed_dim]
         keys = torch.stack([k for k in self.keys])
 
-        # Mean query across batch
-        query_mean = query.mean(dim=0)  # [embed_dim]
+        # Normalize query per sample: [batch, embed_dim]
+        query_norm = F.normalize(query, dim=-1)
+        # Normalize keys: [num_prompts, embed_dim]
+        keys_norm = F.normalize(keys, dim=-1)
 
-        # Compute cosine similarities
-        query_norm = F.normalize(query_mean.unsqueeze(0), dim=-1)  # [1, embed_dim]
-        keys_norm = F.normalize(keys, dim=-1)  # [num_prompts, embed_dim]
+        # Compute per-sample similarities: [batch, num_prompts]
+        similarities = query_norm @ keys_norm.T
 
-        similarities = (query_norm @ keys_norm.T).squeeze(0)  # [num_prompts]
+        # Get top-1 selection per sample: [batch]
+        per_sample_idx = similarities.argmax(dim=1)
 
-        # Select prompt with highest similarity
-        selected_idx = similarities.argmax().item()
+        # Count votes for each prompt
+        num_prompts = len(self.prompts)
+        vote_counts = torch.zeros(num_prompts, device=query.device)
+        for idx in per_sample_idx:
+            vote_counts[idx] += 1
 
-        return selected_idx, self.prompts[selected_idx]
+        # Select prompt with most votes (deterministic for reproducibility)
+        selected_idx = vote_counts.argmax().item()
+
+        # No pull loss - keys are fixed, only prompts learn
+        # This prevents winner-take-all collapse
+        pull_loss = torch.tensor(0.0, device=query.device)
+
+        return selected_idx, self.prompts[selected_idx], pull_loss
 
     def get_parameters(self) -> list[nn.Parameter]:
-        """Return all parameters (prompts + keys) for optimizer."""
-        return list(self.prompts) + list(self.keys)
+        """Return all trainable parameters (only prompts, not keys)."""
+        # Keys are fixed for stable selection, only prompts learn
+        return list(self.prompts)
 
 
 def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
@@ -154,7 +246,25 @@ def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
         device=config.device,
     )
 
-    # Optimizer for prompts and keys
+    # Initialize keys from data (use k-means++ on CLS embeddings)
+    print("Initializing keys from data...")
+    if config.dataset == "amazon":
+        init_stream = StreamingAmazonMultiDomain(
+            steps_per_domain=config.steps_per_domain,
+            batch_size=config.batch_size,
+            tokenizer_name=config.backbone,
+            domains=config.amazon_domains,
+            balance_labels=config.balance_labels,
+        )
+    else:
+        init_stream = StreamingSST2(
+            flip_every_n=config.flip_interval,
+            batch_size=config.batch_size,
+            tokenizer_name=config.backbone,
+        )
+    pool.initialize_keys_from_data(model, init_stream, num_samples=200)
+
+    # Optimizer for prompts only (keys are fixed)
     optimizer = torch.optim.AdamW(pool.get_parameters(), lr=config.lr)
 
     # Checkpoint directory
@@ -207,18 +317,20 @@ def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
             else:
                 batch_device["flipped"] = batch["flipped"]
 
-            # Get input embedding for selection
-            input_embed = pool.get_input_embedding(model, batch_device["input_ids"])
+            # Get input embedding for selection (uses CLS from backbone)
+            input_embed = pool.get_input_embedding(
+                model, batch_device["input_ids"], batch_device["attention_mask"]
+            )
 
             # Select prompt based on similarity
-            selected_idx, prompt = pool.select_prompt(input_embed)
+            selected_idx, prompt, _ = pool.select_prompt(input_embed)
             selection_counts[selected_idx] += 1
 
             # Forward pass
             logits = model(batch_device["input_ids"], batch_device["attention_mask"], prompt)
             loss = F.cross_entropy(logits, batch_device["labels"])
 
-            # Backward pass (updates both prompt and its key)
+            # Backward pass (only updates selected prompt, keys are fixed)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
