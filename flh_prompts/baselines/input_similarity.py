@@ -40,10 +40,9 @@ class PromptPoolWithKeys(nn.Module):
             for _ in range(num_prompts)
         ])
 
-        # Keys will be initialized from data in initialize_keys_from_data()
-        # Start with placeholder random keys
+        # Keys are learned (not frozen) and initialized from data later
         self.keys = nn.ParameterList([
-            nn.Parameter(torch.randn(embed_dim, device=device), requires_grad=False)
+            nn.Parameter(torch.randn(embed_dim, device=device))
             for _ in range(num_prompts)
         ])
         self._keys_initialized = False
@@ -180,16 +179,23 @@ class PromptPoolWithKeys(nn.Module):
         # Select prompt with most votes (deterministic for reproducibility)
         selected_idx = vote_counts.argmax().item()
 
-        # No pull loss - keys are fixed, only prompts learn
-        # This prevents winner-take-all collapse
-        pull_loss = torch.tensor(0.0, device=query.device)
+        # Pull loss: encourage the selected key to align with the current batch.
+        # If no samples vote for the selected prompt (edge case), fall back to
+        # the mean query embedding to keep gradients flowing.
+        mask = per_sample_idx == selected_idx
+        if mask.any():
+            target_query = query_norm[mask].mean(dim=0)
+        else:
+            target_query = query_norm.mean(dim=0)
+
+        # 1 - cosine similarity so lower is better (aligned vectors)
+        pull_loss = 1 - F.cosine_similarity(self.keys[selected_idx], target_query, dim=0)
 
         return selected_idx, self.prompts[selected_idx], pull_loss
 
     def get_parameters(self) -> list[nn.Parameter]:
-        """Return all trainable parameters (only prompts, not keys)."""
-        # Keys are fixed for stable selection, only prompts learn
-        return list(self.prompts)
+        """Return all trainable parameters (prompts + keys)."""
+        return list(self.prompts) + list(self.keys)
 
 
 def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
@@ -264,7 +270,7 @@ def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
         )
     pool.initialize_keys_from_data(model, init_stream, num_samples=200)
 
-    # Optimizer for prompts and classifier (keys are fixed)
+    # Optimizer for prompts, keys, and classifier head
     optimizer = torch.optim.AdamW(
         pool.get_parameters() + list(model.model.classifier.parameters()),
         lr=config.lr
@@ -326,14 +332,16 @@ def train_input_similarity(config: TrainConfig, num_prompts: int = 10) -> dict:
             )
 
             # Select prompt based on similarity
-            selected_idx, prompt, _ = pool.select_prompt(input_embed)
+            selected_idx, prompt, pull_loss = pool.select_prompt(input_embed)
             selection_counts[selected_idx] += 1
 
             # Forward pass
             logits = model(batch_device["input_ids"], batch_device["attention_mask"], prompt)
-            loss = F.cross_entropy(logits, batch_device["labels"])
+            ce_loss = F.cross_entropy(logits, batch_device["labels"])
+            # Encourage selected key to stay close to current batch embedding
+            loss = ce_loss + 0.1 * pull_loss
 
-            # Backward pass (only updates selected prompt, keys are fixed)
+            # Backward pass (updates selected prompt and its key via pull_loss)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
