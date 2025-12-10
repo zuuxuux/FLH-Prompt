@@ -27,7 +27,7 @@ def train(
     method: str = typer.Option(
         "flh",
         "--method", "-m",
-        help="Training method: flh, single, random, similarity",
+        help="Training method: flh (Fixed Share), hedge, trueflh, single, random, similarity",
     ),
     dataset: str = typer.Option(
         "cifar10",
@@ -119,8 +119,14 @@ def train(
 
     # Run training based on method
     if method == "flh":
-        console.print("\n[bold blue]Starting FLH Vision training...[/bold blue]")
-        results = train_flh_vision(config)
+        console.print("\n[bold blue]Starting Fixed Share Vision training...[/bold blue]")
+        results = train_flh_vision(config, pool_type="fixedshare")
+    elif method == "hedge":
+        console.print("\n[bold blue]Starting Hedge (pure multiplicative) Vision training...[/bold blue]")
+        results = train_flh_vision(config, pool_type="hedge")
+    elif method == "trueflh":
+        console.print("\n[bold blue]Starting True FLH (adaptive regret) Vision training...[/bold blue]")
+        results = train_flh_vision(config, pool_type="trueflh")
     elif method == "single":
         console.print("\n[bold blue]Starting single prompt vision baseline...[/bold blue]")
         results = train_single_prompt_vision(config)

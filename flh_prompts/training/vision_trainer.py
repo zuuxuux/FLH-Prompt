@@ -12,7 +12,7 @@ from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, T
 
 from flh_prompts.data.streaming_vision import StreamingCIFAR10, StreamingCIFAR10Binary
 from flh_prompts.models.frozen_vit import FrozenViTWithPrompt
-from flh_prompts.models.flh_pool import FLHPromptPool
+from flh_prompts.models.flh_pool import FLHPromptPool, HedgePool, FixedSharePool, TrueFLHPool
 
 
 @dataclass
@@ -130,20 +130,25 @@ def get_all_losses_vision(
     return losses
 
 
-def train_flh_vision(config: VisionTrainConfig) -> dict:
-    """Train using FLH prompt pooling with vision backbone.
+def train_flh_vision(config: VisionTrainConfig, pool_type: Literal["fixedshare", "hedge", "trueflh"] = "fixedshare") -> dict:
+    """Train using online learning prompt pooling with vision backbone.
 
     Args:
         config: Training configuration.
+        pool_type: Which pool algorithm to use:
+            - "fixedshare": Fixed Share with per-step mixing (default, prevents extinction)
+            - "hedge": Pure multiplicative weights (can go extinct)
+            - "trueflh": True FLH with sub-algorithm ensemble (adaptive regret)
 
     Returns:
         Dictionary of training results.
     """
     # Initialize wandb
+    run_name = config.wandb_run_name or f"{pool_type}_vision_{config.dataset}"
     wandb.init(
         project=config.wandb_project,
-        name=config.wandb_run_name or f"flh_vision_{config.dataset}",
-        config=config.__dict__,
+        name=run_name,
+        config={**config.__dict__, "pool_type": pool_type},
     )
 
     # Setup model
@@ -171,14 +176,30 @@ def train_flh_vision(config: VisionTrainConfig) -> dict:
             rotation_type=config.rotation_type,
         )
 
-    # Initialize prompt pool with first prompt
-    print("Initializing FLH prompt pool...")
-    pool = FLHPromptPool(
-        prompt_length=config.prompt_length,
-        embed_dim=config.embed_dim,
-        alpha=config.alpha,
-        device=config.device,
-    )
+    # Initialize prompt pool based on pool_type
+    print(f"Initializing {pool_type} prompt pool...")
+    if pool_type == "hedge":
+        pool = HedgePool(
+            prompt_length=config.prompt_length,
+            embed_dim=config.embed_dim,
+            eta=config.alpha,
+            device=config.device,
+        )
+    elif pool_type == "trueflh":
+        pool = TrueFLHPool(
+            prompt_length=config.prompt_length,
+            embed_dim=config.embed_dim,
+            eta=config.alpha,
+            device=config.device,
+        )
+    else:  # fixedshare (default)
+        pool = FixedSharePool(
+            prompt_length=config.prompt_length,
+            embed_dim=config.embed_dim,
+            eta=config.alpha,
+            alpha=0.01,  # Fixed Share mixing rate
+            device=config.device,
+        )
     pool.birth_prompt()
 
     # Setup optimizer - include both prompt params and classifier params

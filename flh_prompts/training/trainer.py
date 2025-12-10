@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from flh_prompts.data.streaming import StreamingSST2, StreamingAmazonMultiDomain, AMAZON_DOMAINS
 from flh_prompts.models.frozen_backbone import FrozenBERTWithPrompt
-from flh_prompts.models.flh_pool import FLHPromptPool
+from flh_prompts.models.flh_pool import FLHPromptPool, HedgePool, FixedSharePool, TrueFLHPool
 
 
 @dataclass
@@ -108,20 +108,25 @@ def train_step(
     return loss_value, accuracy
 
 
-def train_flh(config: TrainConfig) -> dict:
-    """Train using FLH prompt pooling.
+def train_flh(config: TrainConfig, pool_type: Literal["fixedshare", "hedge", "trueflh"] = "fixedshare") -> dict:
+    """Train using online learning prompt pooling.
 
     Args:
         config: Training configuration.
+        pool_type: Which pool algorithm to use:
+            - "fixedshare": Fixed Share with per-step mixing (default, prevents extinction)
+            - "hedge": Pure multiplicative weights (can go extinct)
+            - "trueflh": True FLH with sub-algorithm ensemble (adaptive regret)
 
     Returns:
         Dictionary of training results.
     """
     # Initialize wandb
+    run_name = config.wandb_run_name or f"{pool_type}_{config.dataset}"
     wandb.init(
         project=config.wandb_project,
-        name=config.wandb_run_name or f"flh_{config.train_mode}",
-        config=config.__dict__,
+        name=run_name,
+        config={**config.__dict__, "pool_type": pool_type},
     )
 
     # Setup model and data
@@ -148,14 +153,30 @@ def train_flh(config: TrainConfig) -> dict:
             tokenizer_name=config.backbone,
         )
 
-    # Initialize prompt pool with first prompt
-    print("Initializing FLH prompt pool...")
-    pool = FLHPromptPool(
-        prompt_length=config.prompt_length,
-        embed_dim=config.embed_dim,
-        alpha=config.alpha,
-        device=config.device,
-    )
+    # Initialize prompt pool based on pool_type
+    print(f"Initializing {pool_type} prompt pool...")
+    if pool_type == "hedge":
+        pool = HedgePool(
+            prompt_length=config.prompt_length,
+            embed_dim=config.embed_dim,
+            eta=config.alpha,  # Use alpha as eta
+            device=config.device,
+        )
+    elif pool_type == "trueflh":
+        pool = TrueFLHPool(
+            prompt_length=config.prompt_length,
+            embed_dim=config.embed_dim,
+            eta=config.alpha,
+            device=config.device,
+        )
+    else:  # fixedshare (default)
+        pool = FixedSharePool(
+            prompt_length=config.prompt_length,
+            embed_dim=config.embed_dim,
+            eta=config.alpha,
+            alpha=0.01,  # Fixed Share mixing rate
+            device=config.device,
+        )
     pool.birth_prompt()
 
     # Setup optimizer - include both prompt params and classifier params

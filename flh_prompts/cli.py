@@ -34,7 +34,7 @@ def train(
     method: str = typer.Option(
         "flh",
         "--method", "-m",
-        help="Training method: flh, single, random, similarity",
+        help="Training method: flh (Fixed Share), hedge, trueflh, single, random, similarity",
     ),
     dataset: str = typer.Option(
         "sst2",
@@ -145,8 +145,14 @@ def train(
 
     # Run training based on method
     if method == "flh":
-        console.print("\n[bold blue]Starting FLH training...[/bold blue]")
-        results = train_flh(train_config)
+        console.print("\n[bold blue]Starting Fixed Share training...[/bold blue]")
+        results = train_flh(train_config, pool_type="fixedshare")
+    elif method == "hedge":
+        console.print("\n[bold blue]Starting Hedge (pure multiplicative) training...[/bold blue]")
+        results = train_flh(train_config, pool_type="hedge")
+    elif method == "trueflh":
+        console.print("\n[bold blue]Starting True FLH (adaptive regret) training...[/bold blue]")
+        results = train_flh(train_config, pool_type="trueflh")
     elif method == "single":
         console.print("\n[bold blue]Starting single prompt baseline...[/bold blue]")
         from flh_prompts.baselines.single_prompt import train_single_prompt
